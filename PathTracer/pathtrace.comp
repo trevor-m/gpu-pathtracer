@@ -1,0 +1,97 @@
+#version 440 core
+layout(local_size_x = 1, local_size_y = 1) in;
+layout(binding = 0, rgba32f) uniform image2D frameBuffer;
+
+// The camera specification
+uniform vec3 eye;
+uniform vec3 ray00;
+uniform vec3 ray10;
+uniform vec3 ray01;
+uniform vec3 ray11;
+
+// Uniform random
+// Source: https://gist.github.com/patriciogonzalezvivo/670c22f3966e662d2f83#file-glsl-noise-md
+float seed = 0.;
+float rand() { return fract(sin(seed++)*43758.5453123); }
+
+
+#define MAX_SCENE_BOUNDS 1000.0
+
+struct hitinfo {
+  vec2 lambda;
+  int bi;
+};
+
+struct box {
+  vec3 min;
+  vec3 max;
+};
+
+#define NUM_BOXES 3
+const box boxes[] = {
+  /* The ground */
+  {vec3(-5.0, -0.1, -5.0), vec3(5.0, 0.0, 5.0)},
+  /* Box in the middle */
+  {vec3(-0.5, 0.0, -0.5), vec3(0.5, 1.0, 0.5)},
+  /* Light source */
+  {vec3(-1, 5.0, -1), vec3(1, 6.0, 1)}
+};
+
+vec2 intersectBox(vec3 origin, vec3 dir, const box b) {
+  vec3 tMin = (b.min - origin) / dir;
+  vec3 tMax = (b.max - origin) / dir;
+  vec3 t1 = min(tMin, tMax);
+  vec3 t2 = max(tMin, tMax);
+  float tNear = max(max(t1.x, t1.y), t1.z);
+  float tFar = min(min(t2.x, t2.y), t2.z);
+  return vec2(tNear, tFar);
+}
+
+bool intersectBoxes(vec3 origin, vec3 dir, out hitinfo info) {
+  float smallest = MAX_SCENE_BOUNDS;
+  bool found = false;
+  for (int i = 0; i < NUM_BOXES; i++) {
+    vec2 lambda = intersectBox(origin, dir, boxes[i]);
+    if (lambda.x > 0.0 && lambda.x < lambda.y && lambda.x < smallest) {
+      info.lambda = lambda;
+      info.bi = i;
+      smallest = lambda.x;
+      found = true;
+    }
+  }
+  return found;
+}
+
+vec4 trace(vec3 origin, vec3 dir) {
+  hitinfo i;
+  vec3 color = vec3(0, 0, 0);
+  for (int n = 0; n < 12; n++) {
+	  if (intersectBoxes(origin, dir, i)) {
+		vec4 gray = vec4(i.bi / 10.0 + 0.8);
+		return vec4(gray.rgb, 1.0);
+	  }
+	  else {
+		break;
+	  }
+  }
+  return vec4(0.0, 0.0, 0.0, 1.0);
+}
+void main() {
+	// first, interpolate the ray
+	// get pixel x,y position
+	ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(frameBuffer);
+	// check bounds
+	if (pixelCoords.x >= size.x || pixelCoords.y >= size.y) {
+		return;
+	}
+	// convert to range from 0 to 1
+	vec2 pos = vec2(pixelCoords) / vec2(size.xy);
+	vec3 rayDir = mix(mix(ray00, ray01, pos.y), mix(ray10, ray11, pos.y), pos.x);
+
+	// base pixel colour for image
+	vec4 color = trace(eye, rayDir);
+
+	// output to a specific pixel in the image
+	imageStore(frameBuffer, pixelCoords, color);
+}
