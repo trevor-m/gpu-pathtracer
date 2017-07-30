@@ -21,7 +21,7 @@ void do_movement();
 const GLuint WIDTH = 512, HEIGHT = 512;
 
 // camera
-Camera camera(glm::vec3(3.0f, 2.0f, 7.0f));
+Camera camera(glm::vec3(50, 52, 295.6));
 // input
 bool keys[1024];
 bool firstMouse = true;
@@ -71,6 +71,9 @@ int main() {
 		GLfloat currentFrame = glfwGetTime();
 		deltaTime = currentFrame - lastFrame;
 		lastFrame = currentFrame;
+		GLfloat fps = 1.0 / deltaTime;
+		std::string title = "PathTracer FPS: " + std::to_string(fps);
+		glfwSetWindowTitle(window, title.c_str());
 		// check and call events
 		glfwPollEvents();
 		do_movement();
@@ -102,6 +105,7 @@ int main() {
 		glUniform3fv(glGetUniformLocation(traceShader.Program, "ray10"), 1, glm::value_ptr(glm::vec3(ray10)));
 		glUniform3fv(glGetUniformLocation(traceShader.Program, "ray11"), 1, glm::value_ptr(glm::vec3(ray11)));
 		glUniform3fv(glGetUniformLocation(traceShader.Program, "eye"), 1, glm::value_ptr(camera.Position));
+		glUniform1f(glGetUniformLocation(traceShader.Program, "time"), currentFrame);
 		glDispatchCompute(WIDTH, HEIGHT, 1);
 
 		// wait for finish

@@ -2,24 +2,49 @@
 layout(local_size_x = 1, local_size_y = 1) in;
 layout(binding = 0, rgba32f) uniform image2D frameBuffer;
 
-// The camera specification
+// The camera
 uniform vec3 eye;
 uniform vec3 ray00;
 uniform vec3 ray10;
 uniform vec3 ray01;
 uniform vec3 ray11;
+// Time for seeding RNG
+uniform float time;
 
-// Uniform random
-// Source: https://gist.github.com/patriciogonzalezvivo/670c22f3966e662d2f83#file-glsl-noise-md
-float seed = 0.;
-float rand() { return fract(sin(seed++)*43758.5453123); }
+#define PI 3.14159265359
+#define SAMPLES_PER_PIXEL 4
+#define NUM_BOUNCES 4
+#define MAX_SCENE_BOUNDS 1000000.0
 
-vec2 rand2f() {
-	return vec2(rand(), rand());
+// Random functions and cosine-weighted normals from
+// http://blog.hvidtfeldts.net/index.php/2015/01/path-tracing-3d-fractals/
+vec2 seed;
+vec2 rand2n() {
+    seed+=vec2(-1,1);
+	// implementation based on: lumina.sourceforge.net/Tutorials/Noise.html
+    return vec2(fract(sin(dot(seed.xy ,vec2(12.9898,78.233))) * 43758.5453),
+		fract(cos(dot(seed.xy ,vec2(4.898,7.23))) * 23421.631));
+};
+vec3 ortho(vec3 v) {
+    //  See : http://lolengine.net/blog/2013/09/21/picking-orthogonal-vector-combing-coconuts
+    return abs(v.x) > abs(v.z) ? vec3(-v.y, v.x, 0.0)  : vec3(0.0, -v.z, v.y);
 }
-
-#define SAMPLES_PER_PIXEL 8
-#define MAX_SCENE_BOUNDS 1000.0
+vec3 getSampleBiased(vec3  dir, float power) {
+	dir = normalize(dir);
+	vec3 o1 = normalize(ortho(dir));
+	vec3 o2 = normalize(cross(dir, o1));
+	vec2 r = rand2n();
+	r.x=r.x*2.*PI;
+	r.y=pow(r.y,1.0/(power+1.0));
+	float oneminus = sqrt(1.0-r.y*r.y);
+	return cos(r.x)*oneminus*o1+sin(r.x)*oneminus*o2+r.y*dir;
+}
+vec3 getSample(vec3 dir) {
+	return getSampleBiased(dir,0.0); // <- unbiased!
+}
+vec3 getCosineWeightedSample(vec3 dir) {
+	return getSampleBiased(dir,1.0);
+}
 
 struct Ray {
 	vec3 origin;
@@ -27,85 +52,103 @@ struct Ray {
 };
 
 struct Sphere {
-	vec3 center;
 	float radius;
+	vec3 center;
+	vec3 emission;
+	vec3 color;
 };
 
-struct hitinfo {
-  vec2 lambda;
-  int bi;
+struct HitData {
+	float t;
+	int index;
 };
 
-struct box {
-  vec3 min;
-  vec3 max;
+#define NUM_SPHERES 9
+//const Sphere spheres[] = {
+  //{vec3(0, -10, 0), 10.0},
+  //{vec3(-2, 0, 0), 2.0},
+  //{vec3(0, 12, 0), 10.0},
+//};
+
+const Sphere spheres[] = {
+ { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f } }, //Left 
+ { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f } }, //Right 
+ { 1e5f, { 50.0f, 40.8f, 1e5f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f } }, //Back 
+ { 1e5f, { 50.0f, 40.8f, -1e5f + 600.0f }, { 0.0f, 0.0f, 0.0f }, { 1.00f, 1.00f, 1.00f } }, //Frnt 
+ { 1e5f, { 50.0f, 1e5f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f } }, //Botm 
+ { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f } }, //Top 
+ { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } }, // small sphere 1
+ { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } }, // small sphere 2
+ { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f } }  // Light
 };
 
-#define NUM_BOXES 3
-const box boxes[] = {
-  /* The ground */
-  {vec3(-5.0, -0.1, -5.0), vec3(5.0, 0.0, 5.0)},
-  /* Box in the middle */
-  {vec3(-0.5, 0.0, -0.5), vec3(0.5, 1.0, 0.5)},
-  /* Light source */
-  {vec3(-1, 5.0, -1), vec3(1, 6.0, 1)}
-};
-
-vec4 intersectSphere(Ray ray, Sphere sphere) {
+bool intersectSphere(Ray ray, Sphere sphere, out float t) {
 	vec3 offset = ray.origin - sphere.center;
 	float a = dot(ray.direction, ray.direction);
 	float b = 2.0 * dot(ray.direction, offset);
 	float c = dot(offset, offset) - sphere.radius * sphere.radius;
 	float determinant = b*b - 4 * a*c;
 	// hit one or both sides
-	if (determinant >= 0.0) {
-	  return vec4(0.4, 0.4, 1.0, 1.0);
+	if (determinant >= 0) {
+		float tNear = (-b - sqrt((b*b) - 4.0*a*c))/(2.0*a);
+		float tFar = (-b + sqrt((b*b) - 4.0*a*c))/(2.0*a);
+		if(tNear > 0 && tFar > 0)
+			t = min(tNear, tFar);
+		else if(tNear > 0)
+			t = tNear;
+		else
+			t = tFar;
+		return true;
 	}
+	return false;
 }
 
-vec2 intersectBox(vec3 origin, vec3 dir, const box b) {
-  vec3 tMin = (b.min - origin) / dir;
-  vec3 tMax = (b.max - origin) / dir;
-  vec3 t1 = min(tMin, tMax);
-  vec3 t2 = max(tMin, tMax);
-  float tNear = max(max(t1.x, t1.y), t1.z);
-  float tFar = min(min(t2.x, t2.y), t2.z);
-  return vec2(tNear, tFar);
+bool intersectScene(Ray ray, out HitData hitData) {
+	float tNearest = MAX_SCENE_BOUNDS;
+	float t = 0;
+	bool hit = false;
+	for (int i = 0; i < NUM_SPHERES; i++) {
+		//if there was an intersection and it is the closest
+		if (intersectSphere(ray, spheres[i], t) && t > 0 && t < tNearest) {
+			tNearest = t;
+			hit = true;
+			hitData.t = t;
+			hitData.index = i;
+		}
+	}
+	return hit;
 }
 
-bool intersectBoxes(vec3 origin, vec3 dir, out hitinfo info) {
-  float smallest = MAX_SCENE_BOUNDS;
-  bool found = false;
-  for (int i = 0; i < NUM_BOXES; i++) {
-    vec2 lambda = intersectBox(origin, dir, boxes[i]);
-    if (lambda.x > 0.0 && lambda.x < lambda.y && lambda.x < smallest) {
-      info.lambda = lambda;
-      info.bi = i;
-      smallest = lambda.x;
-      found = true;
-    }
-  }
-  return found;
+vec3 trace(Ray ray) {
+	HitData hitData;
+	vec3 color = vec3(0, 0, 0);
+	vec3 mask = vec3(1, 1, 1);
+	for (int n = 0; n < NUM_BOUNCES; n++) {
+		if (!intersectScene(ray, hitData))
+			return color;
+
+		//return spheres[hitData.index].color;
+		//accumulate color
+		color += mask * spheres[hitData.index].emission;
+		//bounce off surface
+		vec3 pos = ray.origin + ray.direction * hitData.t;
+		vec3 normal = normalize(pos - spheres[hitData.index].center);
+		normal = dot(normal, ray.direction) < 0 ? normal : -1 * normal;
+		//create next ray
+		ray.origin = pos + normal * 0.05f;
+		ray.direction = normalize(getCosineWeightedSample(normal));
+
+		//attenuate color
+		mask *= spheres[hitData.index].color * dot(normal, ray.direction) * 2;
+	}
+	return color;
 }
 
-vec3 trace(vec3 origin, vec3 dir) {
-  hitinfo i;
-  vec3 color = vec3(0, 0, 0);
-  for (int n = 0; n < 12; n++) {
-	  if (intersectBoxes(origin, dir, i)) {
-		vec3 gray = vec3(i.bi / 10.0 + 0.8);
-		return gray;
-	  }
-	  else {
-		break;
-	  }
-  }
-  return vec3(0.0, 0.0, 0.0);
-}
 void main() {
 	// first, interpolate the ray
 	// get pixel x,y position
 	ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+	seed = vec2(pixelCoords) * time;
     ivec2 size = imageSize(frameBuffer);
 	// check bounds
 	if (pixelCoords.x >= size.x || pixelCoords.y >= size.y) {
@@ -113,13 +156,16 @@ void main() {
 	}
 	
 	vec3 color = vec3(0,0,0);
+	Ray ray;
+	ray.origin = eye;
 	for (int n = 0; n < SAMPLES_PER_PIXEL; n++) {
 		// convert to range from 0 to 1
-		vec2 pos = (vec2(pixelCoords) + rand2f()) / vec2(size.xy);
-		vec3 rayDir = mix(mix(ray00, ray01, pos.y), mix(ray10, ray11, pos.y), pos.x);
+		vec2 pos = (vec2(pixelCoords) + rand2n()) / vec2(size.xy);
+		ray.direction = mix(mix(ray00, ray01, pos.y), mix(ray10, ray11, pos.y), pos.x);
 
-		color += trace(eye, rayDir) / SAMPLES_PER_PIXEL;
+		color += trace(ray);
 	}
+	color /= SAMPLES_PER_PIXEL;
 
 	// output to a specific pixel in the image
 	imageStore(frameBuffer, pixelCoords, vec4(color, 1.0));
